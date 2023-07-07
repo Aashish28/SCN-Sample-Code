@@ -1,0 +1,16 @@
+*&---------------------------------------------------------------------*
+*& Report YSBPA_TEST
+*&---------------------------------------------------------------------*
+*& Trigger SBPA Test Program
+*&---------------------------------------------------------------------*
+REPORT ysbpa_test.
+
+DATA(lr_sbpa) = NEW ycl_btp_sbpa( ).
+DATA(ls_emp) = VALUE yza_t_employee( eid = 1 fname = 'Tom' dept = 'SAP' status = 'N' ).
+DATA: lv_sbpaid TYPE string,lv_status TYPE string.
+IF lr_sbpa->authenticate( ) = abap_true.
+  DATA(lv_return) =  lr_sbpa->trigger_sbpa( EXPORTING is_emp = ls_emp IMPORTING ev_sbpaid = lv_sbpaid ev_status = lv_status ).
+  WRITE | SBPA triggred succesfully : | && lv_return && | instance id is | && lv_sbpaid && | and status| && lv_status .
+ELSE.
+  WRITE 'Authentication failed'.
+ENDIF.
