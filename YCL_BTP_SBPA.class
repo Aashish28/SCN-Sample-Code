@@ -1,0 +1,179 @@
+class YCL_BTP_SBPA definition
+  public
+  final
+  create public .
+
+public section.
+
+  constants C_API_URL type STRING value 'https://spa-api-gateway-bpi-us-prod.cfapps.us10.hana.ondemand.com' ##NO_TEXT.
+  constants C_API_PATH type STRING value '/workflow/rest/v1/workflow-instances' ##NO_TEXT.
+  data M_OAUTH type STRING .
+  data M_CONTENT_CLIENTS type STRING .
+
+  methods AUTHENTICATE
+    returning
+      value(RV_AUTHENTICATED) type ABAP_BOOL .
+  methods TRIGGER_SBPA
+    importing
+      !IS_EMP type YZA_T_EMPLOYEE
+    exporting
+      value(EV_SBPAID) type STRING
+      value(EV_STATUS) type STRING
+    returning
+      value(RV_SUCCESS) type ABAP_BOOL .
+protected section.
+private section.
+ENDCLASS.
+
+
+
+CLASS YCL_BTP_SBPA IMPLEMENTATION.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method YCL_BTP_SBPA->AUTHENTICATE
+* +-------------------------------------------------------------------------------------------------+
+* | [<-()] RV_AUTHENTICATED               TYPE        ABAP_BOOL
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD authenticate.
+
+    DATA: lr_client         TYPE REF TO if_http_client,
+          lv_destination    TYPE C.
+
+      CALL METHOD cl_http_client=>create_by_destination
+        EXPORTING
+          destination              = 'YZA_BTP_SBPA_OAUTH2'
+        IMPORTING
+          client                   = lr_client
+        EXCEPTIONS
+          argument_not_found       = 1
+          destination_not_found    = 2
+          destination_no_authority = 3
+          plugin_not_active        = 4
+          internal_error           = 5
+          OTHERS                   = 6.
+
+    IF sy-subrc = 0.
+
+*     If you have the class cl_oauth2_client in your system check note 3041322 or use following method
+      lr_client->request->set_header_field( name  =  if_http_header_fields_sap=>request_method  value =  'POST' ).
+      lr_client->request->set_header_field( name  = 'grant_type'  value =  'client_credentials' ).
+      lr_client->request->set_header_field( name  =  if_http_header_fields_sap=>request_uri  value =  '/oauth/token?grant_type=client_credentials' ).
+      lr_client->send( ).
+      lr_client->receive( ).
+
+      lr_client->response->get_status(
+        IMPORTING
+          code   = DATA(lv_code) ).
+
+      IF lv_code = '200'.
+
+        DATA: rest  TYPE string.
+
+        DATA(l_content) = lr_client->response->get_cdata( ).
+        SPLIT l_content AT '"access_token":"' INTO rest l_content.
+        SPLIT l_content AT '"' INTO m_oauth rest.
+
+        rv_authenticated = abap_true.
+
+      ELSE.
+        rv_authenticated = abap_false.
+      ENDIF.
+
+      lr_client->close(  ).
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method YCL_BTP_SBPA->TRIGGER_SBPA
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IS_EMP                         TYPE        YZA_T_EMPLOYEE
+* | [<---] EV_SBPAID                      TYPE        STRING
+* | [<---] EV_STATUS                      TYPE        STRING
+* | [<-()] RV_SUCCESS                     TYPE        ABAP_BOOL
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+    METHOD TRIGGER_SBPA.
+
+
+    DATA lr_client         TYPE REF TO if_http_client.
+    DATA lo_request_part         TYPE REF TO if_http_entity.
+    DATA lo_request_part2         TYPE REF TO if_http_entity.
+    DATA lv_content_disposition TYPE string.
+    DATA len           TYPE i.
+    DATA lv_options TYPE string.
+
+    DATA: BEGIN OF ls_sbpa_trigger_response,
+            id            TYPE string,
+            status        TYPE string,
+            processedtime TYPE string,
+          END OF ls_sbpa_trigger_response.
+
+    CLEAR rv_success.
+
+    CALL METHOD cl_http_client=>create_by_url
+      EXPORTING
+        url                = c_api_url
+      IMPORTING
+        client             = lr_client
+      EXCEPTIONS
+        argument_not_found = 1
+        plugin_not_active  = 2
+        internal_error     = 3
+        OTHERS             = 4.
+
+    IF sy-subrc = 0.
+
+      " Set endpoint url
+      lr_client->request->set_header_field( name  =  if_http_header_fields_sap=>request_method  value =  if_http_request=>co_request_method_post ).
+      lr_client->request->set_header_field( name  =  if_http_header_fields_sap=>request_uri  value =  c_api_path ).
+      lr_client->request->set_header_field( name  =  'Authorization'  value =  |Bearer { m_oauth }| ).
+      lr_client->request->set_content_type( if_rest_media_type=>gc_appl_json ).
+      lr_client->request->set_header_field( name = 'Accept' value = if_rest_media_type=>gc_appl_json ).
+
+
+      " Creating payload
+      CONSTANTS: c_object_start TYPE c VALUE '{',
+                 c_object_end   TYPE c VALUE '}',
+                 c_wf_defid TYPE string VALUE 'us10.9ea4b838trial.emppa.empP'.
+
+      lv_options = c_object_start.
+      lv_options = |{ lv_options }"definitionId":"{ c_wf_defid }","context": { c_object_start } "empid":"{ is_emp-eid }","empname":"{ is_emp-fname }","dept":"{ is_emp-dept }","status":"{ is_emp-status }"{ c_object_end } |.
+      lv_options = | { lv_options } { c_object_end } |.
+
+      CALL METHOD lr_client->request->set_header_field( name = 'Content-Type' value = 'application/json' ).
+      lr_client->request->set_cdata(
+        EXPORTING
+         data   =  lv_options  ).
+
+      "Send payload to event mesh service
+      lr_client->send( ).
+
+      "Receive response from BTP service
+      lr_client->receive( ).
+
+      DATA(l_content_clients) = lr_client->response->get_cdata( ).
+      /ui2/cl_json=>deserialize( EXPORTING json = l_content_clients pretty_name = /ui2/cl_json=>pretty_mode-camel_case CHANGING data = ls_sbpa_trigger_response ).
+
+
+      lr_client->response->get_status(
+        IMPORTING
+          code   = DATA(lv_code) ).
+
+      IF lv_code = '201'.
+        rv_success = abap_true.
+        ev_sbpaid = ls_sbpa_trigger_response-id.
+        ev_status = ls_sbpa_trigger_response-status.
+        "rv_job = ls_create_job_response-id.
+      ELSE.
+        rv_success = abap_false.
+      ENDIF.
+
+      lr_client->close(  ).
+
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.
